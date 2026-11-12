@@ -1,9 +1,45 @@
 (function () {
 "use strict";
+
 var BASE_URL = "https://vegamovies10.co.in/";
 var WORKER_LIST = ["https://restless-glitter-f6c4.dktczn.workers.dev/?url=","https://dry-bush-87cf.umair92n.workers.dev/?url="];
+var LICENSED_HOST = "cineflixtheme.blogspot.com";
+var REDIRECT_URL = "https://cineflixtheme.blogspot.com/";
+
+/* ===== LICENSE CHECK LAYER 3: MAIN SCRIPT BLOCK ===== */
+(function(){
+  var host = (location.hostname || "").toLowerCase();
+  var stem = LICENSED_HOST.replace(/\.blogspot\.[a-z.]+$/i, "");
+  var isLicensed = (host === LICENSED_HOST) || 
+                   (host.indexOf(stem + ".blogspot.") === 0) ||
+                   (host === "www." + LICENSED_HOST);
+  if (!isLicensed) {
+    document.body.innerHTML = "<div style='padding:40px;color:#f00;font-family:monospace;text-align:center;min-height:100vh;display:flex;align-items:center;justify-content:center;flex-direction:column'><h1>⛔ UNAUTHORIZED</h1><p style='color:#fff'>Theme licensed to cineflixtheme.blogspot.com only.</p><p style='color:#fff'>Redirecting in <span id='cfCd3'>3</span> seconds...</p><p style='color:#666;font-size:12px'>Detected: " + host + "</p><p style='margin-top:25px'><a href='" + REDIRECT_URL + "' style='color:#0f0;text-decoration:none;font-size:16px;border:1px solid #0f0;padding:10px 20px;border-radius:6px'>Go to Original Site →</a></p></div>";
+    var c3 = 3, e3 = document.getElementById('cfCd3');
+    var t3 = setInterval(function(){ c3--; if(e3) e3.textContent = c3; if(c3 <= 0){ clearInterval(t3); window.location.replace(REDIRECT_URL); } }, 1000);
+    setTimeout(function(){ window.location.replace(REDIRECT_URL); }, 3000);
+    throw new Error("blocked: " + host);
+  }
+})();
+
+/* ===== LICENSE CHECK LAYER 4: REMOTE API (CLOUDFLARE WORKER) ===== */
+(function(){
+  var LICENSE_API = "https://yellow-term-2b12.xuyacuqayuy462.workers.dev/"; // <--- Yahan apna Cloudflare Worker URL dalein
+  if (!LICENSE_API || LICENSE_API.indexOf("your-worker") !== -1) return;
+  
+  fetch(LICENSE_API + "?domain=" + encodeURIComponent(location.hostname))
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (d && !d.valid) {
+        window.location.replace(REDIRECT_URL);
+      }
+    })
+    .catch(function(){ /* API fail ho toh ignore karein */ });
+})();
+
 var currentPage = 1, currentCategory = "", isLoading = false, hasMore = true;
 var originalMetaTags = {}, loadedUrls = new Set(), totalLoaded = 0;
+var currentPermalink = "";
 var moviesGrid = document.getElementById("moviesGrid");
 var loader = document.getElementById("loadingIndicator");
 var tabs = document.querySelectorAll(".tab");
@@ -14,7 +50,6 @@ var preloader = document.getElementById("preloader");
 var breadcrumb = document.getElementById("breadcrumb");
 var pageTitle = document.getElementById("pageTitle");
 
-// PRELOADER KILL SWITCH
 function killPreloader(){
   if(preloader && preloader.style.display !== "none"){
     preloader.style.opacity = "0";
@@ -43,6 +78,40 @@ async function fetchHtmlThroughWorker(targetUrl) {
   throw lastErr || new Error("All workers failed");
 }
 
+/* ===== CLEAN TITLE: remove leading numeric ID like "60669 " ===== */
+function cleanTitle(raw){
+  if(!raw) return "";
+  return raw.replace(/^\s*\d{3,}\s+/, "").trim();
+}
+
+/* ===== TITLE FROM SLUG (fallback) ===== */
+function slugToTitle(slug){
+  if(!slug) return "";
+  return slug
+    .replace(/\.html?$/i,"")
+    .split("-")
+    .map(function(w){ return w ? (w.charAt(0).toUpperCase() + w.slice(1)) : ""; })
+    .join(" ")
+    .replace(/\s+/g," ")
+    .trim();
+}
+
+/* ===== SESSION STORAGE for title persistence on refresh ===== */
+var TITLE_KEY = "cfm_post_title";
+function saveTitle(slug, title){
+  try {
+    var store = JSON.parse(sessionStorage.getItem(TITLE_KEY) || "{}");
+    store[slug] = cleanTitle(title);
+    sessionStorage.setItem(TITLE_KEY, JSON.stringify(store));
+  } catch(_) {}
+}
+function readSavedTitle(slug){
+  try {
+    var store = JSON.parse(sessionStorage.getItem(TITLE_KEY) || "{}");
+    return store[slug] || "";
+  } catch(_) { return ""; }
+}
+
 function storeOriginalMetaTags() {
   originalMetaTags = {
     title: document.title,
@@ -63,8 +132,12 @@ function restoreOriginalMetaTags() {
   set('meta[property="og:url"]', originalMetaTags.ogUrl);
   set('meta[property="og:image"]', originalMetaTags.ogImage);
 }
-function updateMetaTags(data) {
-  if (data.title) document.title = data.title;
+
+/* ===== FIXED: do NOT overwrite document.title on refresh from slug ===== */
+function updateMetaTags(data, isRefreshFromSlug) {
+  if (data.title && !isRefreshFromSlug) {
+    document.title = cleanTitle(data.title);
+  }
   var set = function(sel,val){ var el=document.querySelector(sel); if(el&&val) el.content=val; };
   set('meta[name="description"]', data.description);
   set('meta[property="og:title"]', data.ogTitle || data.title);
@@ -72,6 +145,7 @@ function updateMetaTags(data) {
   set('meta[property="og:url"]', data.ogUrl);
   set('meta[property="og:image"]', data.ogImage);
 }
+
 function extractMetaData(doc) {
   var meta = { title: doc.title };
   var m = function(p){ var el=doc.querySelector('meta[property="'+p+'"]'); return el?el.content:null; };
@@ -84,22 +158,49 @@ function extractMetaData(doc) {
   return meta;
 }
 
+function slugFromUrl(url) {
+  try {
+    var path = url.split("?")[0].split("#")[0].replace(/\/+$/, "");
+    var parts = path.split("/");
+    var last = parts[parts.length - 1] || "";
+    last = last.replace(/\.html?$/i, "");
+    var idx = parts.length - 1;
+    while ((!last || /^page$|^index$/i.test(last)) && idx > 0) {
+      idx--;
+      last = (parts[idx] || "").replace(/\.html?$/i, "");
+    }
+    last = decodeURIComponent(last);
+    last = last.toLowerCase().replace(/[^a-z0-9\-_. ]+/g, "").replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^[-_]+|[-_]+$/g, "");
+    return last;
+  } catch (_) { return ""; }
+}
+function buildPermalinkHref(sourceUrl) {
+  var slug = slugFromUrl(sourceUrl);
+  if (!slug) slug = "post";
+  return "/" + slug + ".html";
+}
+function resolveSourceUrlFromSlug(slug) {
+  if (!slug) return "";
+  if (/^https?:\/\//i.test(slug)) return slug;
+  return BASE_URL.replace(/\/+$/, "") + "/" + slug + ".html";
+}
+function getCurrentSlug() {
+  var path = window.location.pathname || "";
+  var m = path.match(/\/([^\/]+?)\.html?$/i);
+  if (m) return m[1];
+  return "";
+}
+
 function updatePageTitle(title) { if(!pageTitle) return; var h1=pageTitle.querySelector("h1"); if(h1) h1.textContent=title||"Latest Releases"; }
 function updateBreadcrumb(cat) {
   if(!breadcrumb) return;
-  if(cat) breadcrumb.innerHTML = '<a href="?">Home</a> <span>›</span> <span>'+cat.replace(/-/g," ")+'</span>';
-  else breadcrumb.innerHTML = '<a href="?">Home</a>';
+  if(cat) breadcrumb.innerHTML = '<a href="/">Home</a> <span>›</span> <span>'+cat.replace(/-/g," ")+'</span>';
+  else breadcrumb.innerHTML = '<a href="/">Home</a>';
 }
 function renderSkeletons(count) {
   if(!moviesGrid) return;
   moviesGrid.innerHTML = "";
   for(var i=0;i<count;i++){ var s=document.createElement("div"); s.className="skeleton"; moviesGrid.appendChild(s); }
-}
-function updateURLParams(key, val) {
-  var url = new URL(window.location);
-  url.searchParams.delete("category");
-  if(val) url.searchParams.set("category", val);
-  window.history.replaceState({}, "", url);
 }
 function buildPageUrl(page, category) {
   var base = BASE_URL.replace(/\/$/, "");
@@ -113,23 +214,42 @@ function createCard(item) {
     if(!titleAnchor) return null;
     var link = titleAnchor.getAttribute("href") || "";
     if(!link) return null;
+    if(link.indexOf("/")===0) link = BASE_URL.replace(/\/$/,"") + link;
+    try { link = new URL(link, BASE_URL).href; } catch(_) {}
     if(loadedUrls.has(link)) return null;
     loadedUrls.add(link);
-    var title = (titleAnchor.getAttribute("title") || titleAnchor.textContent || "").trim();
+    var title = cleanTitle((titleAnchor.getAttribute("title") || titleAnchor.textContent || "").trim());
     var img = item.querySelector("img");
     var poster = img ? (img.getAttribute("data-src") || img.getAttribute("src") || "") : "";
-    if(poster.indexOf("//")===0) poster="https:"+poster;
-    else if(poster.indexOf("/")===0) poster=BASE_URL.replace(/\/$/,"")+poster;
-    if(!poster) poster="https://via.placeholder.com/300x450/111/333?text=No+Poster";
+    if(poster.indexOf("//")===0) poster = "https:" + poster;
+    else if(poster.indexOf("/")===0) poster = BASE_URL.replace(/\/$/,"") + poster;
+    if(!poster) poster = "https://via.placeholder.com/300x450/111/333?text=No+Poster";
     var metaSpan = item.querySelector(".entry-meta .date") || item.querySelector(".date") || item.querySelector("time");
     var dateText = metaSpan ? metaSpan.textContent.trim() : "Recently Added";
-    if(link.indexOf("/")===0) link=BASE_URL.replace(/\/$/,"")+link;
     var card = document.createElement("div");
     card.className = "movie-card";
-    card.innerHTML = '<div class="poster-box"><img src="'+poster+'" alt="'+title.replace(/"/g,"&quot;")+'" loading="lazy" /><div class="play-btn"><i class="fas fa-play"></i></div><div class="card-overlay"><div class="movie-date"><i class="fas fa-calendar-alt"></i> '+dateText+'</div><div class="movie-title">'+title+'</div></div></div>';
-    card.addEventListener("click", function(){ if(link) openModal(link, title); });
+    var permalinkHref = buildPermalinkHref(link);
+    var anchor = document.createElement("a");
+    anchor.href = permalinkHref;
+    anchor.setAttribute("data-url", link);
+    anchor.setAttribute("data-title", title);
+    anchor.style.display = "block";
+    anchor.style.color = "inherit";
+    anchor.innerHTML = '<div class="poster-box"><img src="' + poster + '" alt="' +
+      title.replace(/"/g,"&quot;") +
+      '" loading="lazy" /><div class="play-btn"><i class="fas fa-play"></i></div><div class="card-overlay"><div class="movie-date"><i class="fas fa-calendar-alt"></i> ' +
+      dateText + '</div><div class="movie-title">' + title + '</div></div></div>';
+    anchor.addEventListener("click", function(e) {
+      if(e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button !== 0) return;
+      e.preventDefault();
+      currentPermalink = window.location.href;
+      saveTitle(slugFromUrl(link), title);
+      try { history.pushState({ post: link, title: title, permalink: permalinkHref }, title || "Movie", permalinkHref); } catch(_) {}
+      openModal(link, title, false);
+    });
+    card.appendChild(anchor);
     return card;
-  } catch(e) { console.error("[createCard]",e); return null; }
+  } catch(e) { console.error("[createCard]", e); return null; }
 }
 
 function extractItems(doc) {
@@ -144,20 +264,18 @@ async function loadMovies() {
   if(loader) loader.style.display="block";
   try {
     var target = buildPageUrl(currentPage, currentCategory);
-    console.log("[load]", target);
     var html = await fetchHtmlThroughWorker(target);
     var doc = new DOMParser().parseFromString(html,"text/html");
     var items = extractItems(doc);
     if(currentPage===1) moviesGrid.innerHTML="";
     if(items.length===0){
       hasMore=false;
-      if(currentPage===1){ moviesGrid.innerHTML="<p style='color:#ff6b6b;text-align:center;grid-column:1/-1;padding:30px'>No content found on page 1. Source or worker may be down.</p>"; }
+      if(currentPage===1){ moviesGrid.innerHTML="<p style='color:#ff6b6b;text-align:center;grid-column:1/-1;padding:30px'>No content found.</p>"; }
       else { var end=document.createElement("div"); end.style.cssText="grid-column:1/-1;padding:20px;text-align:center;color:#666;font-size:13px"; end.textContent="— End of list —"; moviesGrid.appendChild(end); }
       return;
     }
     var added=0;
     items.forEach(function(item){ var card=createCard(item); if(card){ moviesGrid.appendChild(card); added++; totalLoaded++; } });
-    console.log("[load] page", currentPage, "→", added, "cards added,", totalLoaded, "total");
     if(added===0 && currentPage>1){
       hasMore=false;
       var end2=document.createElement("div"); end2.style.cssText="grid-column:1/-1;padding:20px;text-align:center;color:#666;font-size:13px"; end2.textContent="— End of list —"; moviesGrid.appendChild(end2);
@@ -168,8 +286,7 @@ async function loadMovies() {
     console.error("[loadMovies]", err);
     if(currentPage>1) hasMore=false;
     if(currentPage===1 && moviesGrid){
-      moviesGrid.innerHTML="<div style='grid-column:1/-1;padding:30px;text-align:center;color:#ff6b6b;font-size:14px'>❌ Failed to fetch content.<br><small style='color:#aaa'>"+(
-      err.message||"Unknown error")+"</small></div>";
+      moviesGrid.innerHTML="<div style='grid-column:1/-1;padding:30px;text-align:center;color:#ff6b6b;font-size:14px'>❌ Failed to fetch content.<br><small style='color:#aaa'>"+(err.message||"Unknown error")+"</small></div>";
     }
   } finally {
     isLoading = false;
@@ -178,25 +295,26 @@ async function loadMovies() {
 }
 
 function resetAndLoad() {
-  currentPage = 1;
-  hasMore = true;
-  totalLoaded = 0;
-  loadedUrls.clear();
-  moviesGrid.innerHTML = "";
-  renderSkeletons(8);
-  loadMovies();
+  currentPage = 1; hasMore = true; totalLoaded = 0; loadedUrls.clear();
+  moviesGrid.innerHTML = ""; renderSkeletons(8); loadMovies();
 }
 
-async function openModal(targetUrl, title) {
+async function openModal(targetUrl, title, updateUrl) {
+  if (updateUrl === undefined) updateUrl = true;
   modal.classList.add("show");
   document.body.style.overflow = "hidden";
-  modalTitle.textContent = title || "Loading...";
+  modalTitle.textContent = cleanTitle(title) || "Loading...";
   modalContent.innerHTML = "<p style='color:#aaa'>Loading details...</p>";
   try {
     var html = await fetchHtmlThroughWorker(targetUrl);
     var doc = new DOMParser().parseFromString(html,"text/html");
     var meta = extractMetaData(doc);
-    updateMetaTags(meta);
+    updateMetaTags(meta, false);
+    if (updateUrl) {
+      currentPermalink = window.location.href;
+      var permalinkHref = buildPermalinkHref(targetUrl);
+      try { window.history.pushState({ post: targetUrl, title: title, permalink: permalinkHref }, "", permalinkHref); } catch(_) {}
+    }
     var contentEl = doc.querySelector(".entry-content") || doc.querySelector(".post-content") || doc.querySelector("article .content") || doc.querySelector("article") || doc.querySelector("main");
     var bodyHtml = contentEl ? contentEl.innerHTML : "<p>No content available.</p>";
     var container = document.createElement("div");
@@ -215,21 +333,16 @@ async function openModal(targetUrl, title) {
         if(href.indexOf("nexdrive")!==-1){
           a.classList.add("nx-download-btn");
           a.setAttribute("data-url", href);
-          a.removeAttribute("target");
-          a.removeAttribute("rel");
+          a.removeAttribute("target"); a.removeAttribute("rel");
           a.href = "javascript:void(0)";
         } else {
-          a.removeAttribute("target");
-          a.removeAttribute("rel");
+          a.removeAttribute("target"); a.removeAttribute("rel");
         }
       } catch(_){}
     });
     modalContent.innerHTML = container.innerHTML;
     modalContent.querySelectorAll("a.nx-download-btn").forEach(function(a){
-      a.addEventListener("click", function(e){
-        e.preventDefault();
-        openNexdrivePopup(a.dataset.url);
-      });
+      a.addEventListener("click", function(e){ e.preventDefault(); openNexdrivePopup(a.dataset.url); });
     });
   } catch(err) {
     console.error("[openModal]", err);
@@ -241,6 +354,12 @@ function closeModal() {
   modal.classList.remove("show");
   document.body.style.overflow = "";
   restoreOriginalMetaTags();
+  if (currentPermalink) {
+    try { window.history.pushState({}, "", currentPermalink); } catch(_) {}
+    currentPermalink = "";
+  } else {
+    if (getCurrentSlug()) { try { window.history.pushState({}, "", "/"); } catch(_) {} }
+  }
 }
 
 function setupEvents() {
@@ -251,7 +370,13 @@ function setupEvents() {
       currentCategory = this.dataset.category || "";
       updatePageTitle(this.textContent.trim());
       updateBreadcrumb(currentCategory);
-      updateURLParams("category", currentCategory);
+      try {
+        var categoryUrl = new URL(window.location.href);
+        categoryUrl.searchParams.delete("post");
+        categoryUrl.searchParams.delete("category");
+        if(currentCategory) categoryUrl.searchParams.set("category", currentCategory);
+        history.pushState({ category: currentCategory }, "", categoryUrl);
+      } catch(_) {}
       resetAndLoad();
     });
   });
@@ -261,10 +386,28 @@ function setupEvents() {
   window.addEventListener("keydown", function(e){
     if(e.key==="Escape" && modal.classList.contains("show")) closeModal();
   });
-  var closeDirect = document.getElementById("closeDirectPost");
-  if(closeDirect) closeDirect.addEventListener("click", function(){
-    var view = document.getElementById("directPostView");
-    if(view) view.classList.remove("active");
+  window.addEventListener("popstate", function(ev) {
+    var state = ev.state || {};
+    var slug = getCurrentSlug();
+    var params = new URLSearchParams(window.location.search);
+    var cat = params.get("category");
+    if (slug) {
+      var sourceUrl = state.post || resolveSourceUrlFromSlug(slug);
+      var titleToUse = state.title || readSavedTitle(slug) || slugToTitle(slug);
+      openModal(sourceUrl, titleToUse, false);
+      return;
+    }
+    if(modal.classList.contains("show")) {
+      modal.classList.remove("show");
+      document.body.style.overflow = "";
+      restoreOriginalMetaTags();
+    }
+    currentPermalink = "";
+    currentCategory = cat || (state.category || "");
+    tabs.forEach(function(t) { t.classList.toggle("active", (t.dataset.category || "") === currentCategory); });
+    updatePageTitle(currentCategory ? currentCategory.replace(/-/g," ") : "Latest Releases");
+    updateBreadcrumb(currentCategory);
+    resetAndLoad();
   });
 }
 
@@ -291,13 +434,41 @@ function setupInfiniteScroll() {
   }
 }
 
+/* ===== FIXED handleURLParams: real title priority ===== */
 function handleURLParams() {
-  if(window.location.search.indexOf("m=1")!==-1){
-    var clean = window.location.href.split("?")[0];
-    window.history.replaceState({}, "", clean);
-  }
   var params = new URLSearchParams(window.location.search);
+  var postParam = params.get("post");
   var cat = params.get("category");
+  if (postParam) {
+    var savedTitle = readSavedTitle(slugFromUrl(postParam));
+    openModal(postParam, savedTitle || slugToTitle(slugFromUrl(postParam)), false);
+    return;
+  }
+  var bloggerPost = document.getElementById("bloggerPostPermalink");
+  if (bloggerPost && bloggerPost.getAttribute("data-post-url")) {
+    var nativeUrl = bloggerPost.getAttribute("data-post-url");
+    var nativeTitle = cleanTitle(bloggerPost.getAttribute("data-post-title") || "Movie Details");
+    var slugForStore = slugFromUrl(nativeUrl) || getCurrentSlug();
+    if (slugForStore) saveTitle(slugForStore, nativeTitle);
+    var postBody = bloggerPost.querySelector(".post-body-content");
+    if (postBody) {
+      var modalBody = document.getElementById("modalContent");
+      var modalTitleEl = document.getElementById("modalTitle");
+      if (modalTitleEl) modalTitleEl.textContent = nativeTitle;
+      if (modalBody) modalBody.innerHTML = postBody.innerHTML;
+      modal.classList.add("show");
+      document.body.style.overflow = "hidden";
+      return;
+    }
+  }
+  var slug = getCurrentSlug();
+  if (slug && !/^\d{4}\/\d{2}\//.test(window.location.pathname)) {
+    var sourceUrl = resolveSourceUrlFromSlug(slug);
+    var savedTitle = readSavedTitle(slug);
+    var titleToUse = savedTitle || slugToTitle(slug);
+    openModal(sourceUrl, titleToUse, false);
+    return;
+  }
   if(cat){
     currentCategory = cat;
     tabs.forEach(function(t){
@@ -369,9 +540,7 @@ async function openNexdrivePopup(url){
       if(a.href && a.href.indexOf("fast-dl")!==-1){
         a.href = "https://dry-bush-87cf.umair92n.workers.dev/?url=" + encodeURIComponent(a.href);
         a.target = "_blank";
-      } else {
-        a.remove();
-      }
+      } else { a.remove(); }
     });
     contentBox.innerHTML = content.innerHTML || "No links found.";
   } catch(err) {
